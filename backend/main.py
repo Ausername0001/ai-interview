@@ -108,29 +108,55 @@ def call_deepseek(messages, json_mode=False):
 
     client = get_client()
 
-    params = {
-        "model": "deepseek-flash",
-        "messages": messages,
-        "stream": False
-    }
+    def request_model(use_json_mode):
 
-    if json_mode:
-        params["response_format"] = {
-            "type": "json_object"
+        params = {
+            "model": "deepseek-flash",
+            "messages": messages,
+            "stream": False,
+            "max_tokens": 2048
         }
 
-    try:
+        # 是否启用 JSON 模式
+        if use_json_mode:
+            params["response_format"] = {
+                "type": "json_object"
+            }
 
-        response = client.chat.completions.create(
-            **params
-        )
+        response = client.chat.completions.create(**params)
 
         answer = response.choices[0].message.content
 
+        print("\n========== DeepSeek API 响应 ==========")
+        print("JSON模式:", use_json_mode)
+        print("Finish reason:", response.choices[0].finish_reason)
+        print("返回内容:", repr(answer))
+        print("=======================================\n")
+
+        # 过滤 None、空字符串和纯空格
+        if answer is None or not answer.strip():
+            return ""
+
+        return answer.strip()
+
+    try:
+
+        # 第一次请求：按照原设置调用模型
+        answer = request_model(json_mode)
+
+        # 如果 JSON 模式返回空白，自动关闭 JSON 模式重试
+        if not answer and json_mode:
+
+            print("JSON 模式返回空白，正在尝试普通文本模式……")
+
+            answer = request_model(False)
+
+        # 两次请求都没有有效内容
         if not answer:
+
             raise HTTPException(
                 status_code=502,
-                detail="模型没有返回有效内容"
+                detail="DeepSeek 模型连续两次未返回有效内容"
             )
 
         return answer
@@ -155,8 +181,6 @@ def call_deepseek(messages, json_mode=False):
             status_code=503,
             detail="无法连接 DeepSeek API，请检查网络"
         )
-
-
 # ==========================================
 # 6. 生成面试回复
 # ==========================================
@@ -177,10 +201,12 @@ def generate_interview_reply(session):
 
     messages.extend(session["history"])
 
-    result = call_deepseek(
-        messages,
-        json_mode=True
-    )
+    result = call_deepseek(messages, json_mode=True)
+
+    print("\n========== DeepSeek 原始响应 ==========")
+    print("返回类型:", type(result))
+    print("返回内容:", repr(result))
+    print("=======================================\n")
 
     try:
 
