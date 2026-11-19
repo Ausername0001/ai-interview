@@ -193,32 +193,34 @@ action = finish
 
 ====================================
 
+
 【输出要求】
 
-必须输出一个JSON对象，不能使用Markdown代码块。
+必须严格按照以下格式输出，不要使用Markdown代码块：
 
-格式：
+ACTION: continue
+REPLY: 面试官回复内容
 
-{{
-    "action": "continue",
-    "reply": "面试官回复内容"
-}}
-
-action只能是以下三种：
+ACTION只能是以下三种：
 
 continue：留在当前阶段，继续提问或交流。
-advance：当前阶段完成，进入下一阶段。
+advance：当前阶段已经充分考察，进入下一阶段。
 finish：结束面试。
+
+必须明确输出ACTION字段，不能省略。
 
 reply必须是自然、简洁的中文。
 
 每次回复只能包含一个主要问题。
 
-如果action为advance：
-reply应当自然衔接下一阶段，并提出下一阶段的第一个问题。
+如果ACTION为advance：
+REPLY应当自然衔接下一阶段，并提出下一阶段的第一个问题。
 
-如果action为finish：
-reply使用面试结束话术，不再提出任何问题。
+如果ACTION为finish：
+REPLY使用面试结束话术，不再提出任何问题。
 
-不要在reply中输出评分、评价、排名或录用建议。
+不要在REPLY中输出评分、评价、排名或录用建议。
+
+ACTION和REPLY必须分别占据独立的行。
+
 """

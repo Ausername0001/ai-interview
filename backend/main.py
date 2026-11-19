@@ -4,6 +4,7 @@
 import os
 import uuid
 import json
+import re
 
 from pathlib import Path
 from datetime import datetime
@@ -185,6 +186,7 @@ def call_deepseek(messages, json_mode=False):
 # 6. 生成面试回复
 # ==========================================
 
+
 def generate_interview_reply(session):
 
     system_prompt = build_system_prompt(
@@ -201,43 +203,53 @@ def generate_interview_reply(session):
 
     messages.extend(session["history"])
 
-    result = call_deepseek(messages, json_mode=True)
+    # 使用普通文本模式，不再启用 JSON 模式
+    result = call_deepseek(
+        messages,
+        json_mode=False
+    )
 
     print("\n========== DeepSeek 原始响应 ==========")
-    print("返回类型:", type(result))
+    print("当前阶段:", session["stage"])
     print("返回内容:", repr(result))
     print("=======================================\n")
 
-    try:
+    # 提取 ACTION
+    action_match = re.search(
+        r"(?im)^\s*ACTION\s*[:：]\s*(continue|advance|finish)\s*$",
+        result
+    )
 
-        data = json.loads(result)
+    # 提取 REPLY
+    reply_match = re.search(
+        r"(?ims)^\s*REPLY\s*[:：]\s*(.*?)\s*$",
+        result
+    )
 
-        action = data.get("action", "continue")
-        reply = data.get("reply", "")
+    if not action_match or not reply_match:
+        print("模型输出格式异常，未找到 ACTION 或 REPLY")
 
-        if action not in [
-            "continue",
-            "advance",
-            "finish"
-        ]:
-            action = "continue"
+        raise HTTPException(
+            status_code=502,
+            detail="模型返回格式异常，请重试本轮面试"
+        )
 
-        if not isinstance(reply, str) or not reply.strip():
-            raise ValueError("模型回复内容为空")
+    action = action_match.group(1).lower()
+    reply = reply_match.group(1).strip()
 
-        return {
-            "action": action,
-            "reply": reply.strip()
-        }
+    if not reply:
+        raise HTTPException(
+            status_code=502,
+            detail="模型回复内容为空，请重试"
+        )
 
-    except (json.JSONDecodeError, ValueError):
+    print("解析后的 action:", action)
+    print("解析后的 reply:", reply)
 
-        # JSON格式异常时，保留模型文本作为普通回复
-        # 不允许格式异常直接触发阶段转换
-        return {
-            "action": "continue",
-            "reply": result.strip()
-        }
+    return {
+        "action": action,
+        "reply": reply
+    }
 
 
 # ==========================================
@@ -443,6 +455,12 @@ def chat(request: ChatRequest):
 
     session["total_turns"] += 1
 
+    old_history_length = len(session["history"])
+    old_stage = session["stage"]
+    old_turns = session["total_turns"]
+    old_completed = session["completed"]
+    old_summary = session["summary"]
+
     try:
 
         # 调用模型
@@ -513,13 +531,20 @@ def chat(request: ChatRequest):
             "summary": session["summary"]
         }
 
+
     except Exception:
 
-        # 模型调用失败时恢复会话
-        session["history"].pop()
+        # 恢复本轮之前的完整会话状态
+
+        session["history"] = session["history"][:old_history_length]
+
         session["stage"] = old_stage
+
         session["total_turns"] = old_turns
-        session["completed"] = False
+
+        session["completed"] = old_completed
+
+        session["summary"] = old_summary
 
         raise
 
