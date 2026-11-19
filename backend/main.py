@@ -105,86 +105,72 @@ def get_client():
 # 5. 通用模型调用
 # ==========================================
 
+
 def call_deepseek(messages, json_mode=False):
 
     client = get_client()
 
-    def request_model(use_json_mode):
+    params = {
+        "model": "deepseek-flash",
+        "messages": messages,
+        "stream": False,
+        "max_tokens": 20480
+    }
 
-        params = {
-            "model": "deepseek-flash",
-            "messages": messages,
-            "stream": False,
-            "max_tokens": 2048
+    # 启用 JSON 模式
+    if json_mode:
+        params["response_format"] = {
+            "type": "json_object"
         }
 
-        # 是否启用 JSON 模式
-        if use_json_mode:
-            params["response_format"] = {
-                "type": "json_object"
-            }
-
+    try:
         response = client.chat.completions.create(**params)
 
-        answer = response.choices[0].message.content
+        choice = response.choices[0]
+        answer = choice.message.content
 
         print("\n========== DeepSeek API 响应 ==========")
-        print("JSON模式:", use_json_mode)
-        print("Finish reason:", response.choices[0].finish_reason)
+        print("JSON模式:", json_mode)
+        print("Finish reason:", choice.finish_reason)
+        print("Usage:", response.usage)
         print("返回内容:", repr(answer))
         print("=======================================\n")
 
-        # 过滤 None、空字符串和纯空格
+        # 检查返回内容
         if answer is None or not answer.strip():
-            return ""
+            raise HTTPException(
+                status_code=502,
+                detail="DeepSeek 模型返回内容为空，请重试"
+            )
+
+        # 如果输出达到 Token 上限，记录警告
+        if choice.finish_reason == "length":
+            print("警告：模型输出达到 Token 上限，内容可能不完整")
 
         return answer.strip()
 
-    try:
-
-        # 第一次请求：按照原设置调用模型
-        answer = request_model(json_mode)
-
-        # 如果 JSON 模式返回空白，自动关闭 JSON 模式重试
-        if not answer and json_mode:
-
-            print("JSON 模式返回空白，正在尝试普通文本模式……")
-
-            answer = request_model(False)
-
-        # 两次请求都没有有效内容
-        if not answer:
-
-            raise HTTPException(
-                status_code=502,
-                detail="DeepSeek 模型连续两次未返回有效内容"
-            )
-
-        return answer
-
     except AuthenticationError:
-
         raise HTTPException(
             status_code=401,
             detail="DeepSeek API Key 无效"
         )
 
     except RateLimitError:
-
         raise HTTPException(
             status_code=429,
             detail="API 请求频率受限，请稍后重试"
         )
 
     except APIConnectionError:
-
         raise HTTPException(
             status_code=503,
             detail="无法连接 DeepSeek API，请检查网络"
         )
+
 # ==========================================
 # 6. 生成面试回复
 # ==========================================
+
 
 
 def generate_interview_reply(session):
@@ -203,10 +189,10 @@ def generate_interview_reply(session):
 
     messages.extend(session["history"])
 
-    # 使用普通文本模式，不再启用 JSON 模式
+    # 使用 JSON 模式调用模型
     result = call_deepseek(
         messages,
-        json_mode=False
+        json_mode=True
     )
 
     print("\n========== DeepSeek 原始响应 ==========")
@@ -214,34 +200,54 @@ def generate_interview_reply(session):
     print("返回内容:", repr(result))
     print("=======================================\n")
 
-    # 提取 ACTION
-    action_match = re.search(
-        r"(?im)^\s*ACTION\s*[:：]\s*(continue|advance|finish)\s*$",
-        result
-    )
+    # 解析 JSON
+    try:
+        data = json.loads(result)
 
-    # 提取 REPLY
-    reply_match = re.search(
-        r"(?ims)^\s*REPLY\s*[:：]\s*(.*?)\s*$",
-        result
-    )
+    except json.JSONDecodeError as e:
 
-    if not action_match or not reply_match:
-        print("模型输出格式异常，未找到 ACTION 或 REPLY")
+        print("JSON 解析失败:", str(e))
 
         raise HTTPException(
             status_code=502,
-            detail="模型返回格式异常，请重试本轮面试"
+            detail="模型返回的 JSON 格式异常，请重试本轮面试"
         )
 
-    action = action_match.group(1).lower()
-    reply = reply_match.group(1).strip()
+    # 检查 JSON 数据类型
+    if not isinstance(data, dict):
 
-    if not reply:
         raise HTTPException(
             status_code=502,
-            detail="模型回复内容为空，请重试"
+            detail="模型返回的数据不是 JSON 对象"
         )
+
+    # 提取字段
+    action = data.get("action")
+    reply = data.get("reply")
+
+    # 检查 action 是否合法
+    allowed_actions = {
+        "continue",
+        "advance",
+        "finish"
+    }
+
+    if action not in allowed_actions:
+
+        raise HTTPException(
+            status_code=502,
+            detail="模型返回了无效的面试阶段指令"
+        )
+
+    # 检查 reply 是否有效
+    if not isinstance(reply, str) or not reply.strip():
+
+        raise HTTPException(
+            status_code=502,
+            detail="模型返回的面试回复为空或格式错误"
+        )
+
+    reply = reply.strip()
 
     print("解析后的 action:", action)
     print("解析后的 reply:", reply)
@@ -252,9 +258,11 @@ def generate_interview_reply(session):
     }
 
 
+
 # ==========================================
 # 7. 生成面试总结
 # ==========================================
+
 
 def generate_summary(session):
 
@@ -265,7 +273,6 @@ def generate_summary(session):
                 if item["role"] == "assistant"
                 else "候选人："
             ) + item["content"]
-
             for item in session["history"]
         ]
     )
@@ -282,12 +289,54 @@ def generate_summary(session):
                 + session["resume_text"]
                 + "\n\n以下是完整面试记录：\n\n"
                 + conversation
-                + "\n\n请严格按照指定格式生成面试总结。"
+                + "\n\n"
+                + "请严格按照系统提示词中的JSON结构生成报告。"
             )
         }
     ]
 
-    return call_deepseek(messages)
+    result = call_deepseek(
+        messages,
+        json_mode=True
+    )
+
+    print("\n========== 面试报告原始响应 ==========")
+    print(repr(result))
+    print("=======================================\n")
+
+    try:
+        summary = json.loads(result)
+
+        # 检查关键字段，避免不完整报告进入前端
+        required_fields = [
+            "candidate_info",
+            "interview_overview",
+            "content_summary",
+            "scores",
+            "strengths",
+            "improvements",
+            "job_match",
+            "recommendation",
+            "manual_review"
+        ]
+
+        for field in required_fields:
+            if field not in summary:
+                raise ValueError(f"报告缺少字段：{field}")
+
+        print("面试报告JSON解析成功")
+
+        return summary
+
+    except (json.JSONDecodeError, ValueError, TypeError) as e:
+
+        print("面试报告解析失败:", str(e))
+
+        raise HTTPException(
+            status_code=502,
+            detail="面试报告生成失败，请重新生成"
+        )
+
 
 
 # ==========================================
