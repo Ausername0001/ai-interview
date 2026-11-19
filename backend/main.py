@@ -36,6 +36,13 @@ from interview_manager import (
     create_interview_session
 )
 
+from database import (
+    init_db,
+    save_session,
+    get_session_from_db,
+    get_all_sessions,
+    delete_session_from_db
+)
 
 # ==========================================
 # 1. 初始化配置
@@ -52,6 +59,10 @@ app = FastAPI(
     version="1.0.0"
 )
 
+@app.on_event("startup")
+def startup_event():
+    init_db()
+    print("SQLite 数据库初始化成功")
 
 # ==========================================
 # 2. 数据模型
@@ -81,6 +92,23 @@ class ChatRequest(BaseModel):
 
 sessions = {}
 
+def load_session(session_id):
+    """
+    优先从内存读取会话。
+    内存不存在时，从 SQLite 数据库恢复。
+    """
+
+    session = sessions.get(session_id)
+
+    if session is not None:
+        return session
+
+    session = get_session_from_db(session_id)
+
+    if session is not None:
+        sessions[session_id] = session
+
+    return session
 
 # ==========================================
 # 4. 初始化 DeepSeek 客户端
@@ -451,6 +479,8 @@ def create_session(request: SessionRequest):
 
     sessions[session_id] = session
 
+    save_session(session)
+
     return {
         "session_id": session_id,
         "stage": session["stage"],
@@ -467,17 +497,16 @@ def create_session(request: SessionRequest):
 @app.post("/chat")
 def chat(request: ChatRequest):
 
-    session = sessions.get(request.session_id)
+    # 优先读取内存；如果没有，则从数据库恢复
+    session = load_session(request.session_id)
 
     if session is None:
-
         raise HTTPException(
             status_code=404,
             detail="面试会话不存在"
         )
 
     if session["completed"]:
-
         raise HTTPException(
             status_code=400,
             detail="本次面试已经结束"
@@ -486,47 +515,40 @@ def chat(request: ChatRequest):
     message = request.message.strip()
 
     if not message:
-
         raise HTTPException(
             status_code=400,
             detail="输入内容不能为空"
         )
 
-    # 保存原始状态
-    old_stage = session["stage"]
-    old_turns = session["total_turns"]
-
-    # 保存候选人回答
-    session["history"].append({
-        "role": "user",
-        "content": message
-    })
-
-    session["total_turns"] += 1
-
+    # 保存本轮开始前的完整状态
     old_history_length = len(session["history"])
     old_stage = session["stage"]
     old_turns = session["total_turns"]
     old_completed = session["completed"]
     old_summary = session["summary"]
+    old_summary_error = session.get("summary_error")
 
     try:
 
-        # 调用模型
+        # 保存候选人回答
+        session["history"].append({
+            "role": "user",
+            "content": message
+        })
+
+        session["total_turns"] += 1
+
+        # 调用模型生成面试回复
         result = generate_interview_reply(session)
 
         action = result["action"]
         answer = result["reply"]
 
-        # ==================================
         # 根据模型判断调整面试阶段
-        # ==================================
-
         if action == "advance":
 
             if session["stage"] == "candidate_questions":
 
-                # 反问阶段不再进入其他环节
                 session["stage"] = "completed"
                 session["completed"] = True
 
@@ -544,30 +566,25 @@ def chat(request: ChatRequest):
             session["stage"] = "completed"
             session["completed"] = True
 
-        # ==================================
         # 保存 AI 回复
-        # ==================================
-
         session["history"].append({
             "role": "assistant",
             "content": answer
         })
 
-        # ==================================
         # 面试结束后生成报告
-        # ==================================
-
         if session["completed"]:
 
             try:
-
-                session["summary"] = generate_summary(
-                    session
-                )
+                session["summary"] = generate_summary(session)
+                session.pop("summary_error", None)
 
             except Exception as e:
-
+                print("面试报告生成失败:", str(e))
                 session["summary_error"] = str(e)
+
+        # 将最新会话状态写入数据库
+        save_session(session)
 
         return {
             "session_id": request.session_id,
@@ -580,35 +597,48 @@ def chat(request: ChatRequest):
             "summary": session["summary"]
         }
 
-
     except Exception:
 
-        # 恢复本轮之前的完整会话状态
-
+        # 恢复到本轮开始前的状态
         session["history"] = session["history"][:old_history_length]
 
         session["stage"] = old_stage
-
         session["total_turns"] = old_turns
-
         session["completed"] = old_completed
-
         session["summary"] = old_summary
+
+        if old_summary_error is None:
+            session.pop("summary_error", None)
+        else:
+            session["summary_error"] = old_summary_error
 
         raise
 
+# ==========================================
+# 获取历史面试记录
+# ==========================================
+
+@app.get("/sessions")
+def list_sessions():
+
+    records = get_all_sessions()
+
+    return {
+        "total": len(records),
+        "sessions": records
+    }
 
 # ==========================================
 # 13. 查询面试状态
 # ==========================================
 
+
 @app.get("/session/{session_id}")
 def get_session(session_id: str):
 
-    session = sessions.get(session_id)
+    session = load_session(session_id)
 
     if session is None:
-
         raise HTTPException(
             status_code=404,
             detail="面试会话不存在"
@@ -616,11 +646,14 @@ def get_session(session_id: str):
 
     return {
         "session_id": session_id,
+        "resume_text": session["resume_text"],
+        "history": session["history"],
         "stage": session["stage"],
         "stage_name": STAGE_NAMES[session["stage"]],
         "total_turns": session["total_turns"],
         "completed": session["completed"],
-        "started_at": session["started_at"]
+        "started_at": session["started_at"],
+        "summary": session["summary"]
     }
 
 
@@ -631,7 +664,7 @@ def get_session(session_id: str):
 @app.get("/session/{session_id}/summary")
 def get_summary(session_id: str):
 
-    session = sessions.get(session_id)
+    session = load_session(session_id)
 
     if session is None:
 
@@ -667,14 +700,20 @@ def get_summary(session_id: str):
 @app.delete("/session/{session_id}")
 def delete_session(session_id: str):
 
-    if session_id not in sessions:
+    # 先检查数据库和内存中是否存在记录
+    session = load_session(session_id)
 
+    if session is None:
         raise HTTPException(
             status_code=404,
             detail="面试会话不存在"
         )
 
-    del sessions[session_id]
+    # 删除数据库记录
+    delete_session_from_db(session_id)
+
+    # 删除内存缓存
+    sessions.pop(session_id, None)
 
     return {
         "message": "面试会话删除成功"
